@@ -51,13 +51,9 @@
         android:padding="8dp">
 
         <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/locationsContainer"
+            android:id="@+id/locationsRecyclerView"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:orientation="vertical"
-            android:layout_weight="0.4"
-            android:padding="8dp"
-            />
+            android:layout_height="wrap_content"/>
     </ScrollView>
 
     <Button
