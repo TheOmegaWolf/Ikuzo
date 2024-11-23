@@ -165,7 +165,6 @@ public class LocationSelector extends AppCompatActivity {
             Toast.makeText(LocationSelector.this, "Geocoding failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
-
     private void getNearbyPlaces(double latitude, double longitude, String interests) {
         List<Place.Field> placeFields = Arrays.asList(
                 Place.Field.NAME,

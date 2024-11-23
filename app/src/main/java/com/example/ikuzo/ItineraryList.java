@@ -7,6 +7,7 @@ import android.location.Geocoder;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -17,12 +18,16 @@ import android.widget.AdapterView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.recyclerview.widget.ItemTouchHelper;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.MapView;
 import com.google.android.gms.maps.OnMapReadyCallback;
 import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.maps.model.LatLngBounds;
 import com.google.android.gms.maps.model.MarkerOptions;
 import com.google.android.gms.maps.model.PolylineOptions;
 import com.google.maps.DirectionsApi;
@@ -42,7 +47,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-public class ItineraryList extends AppCompatActivity implements OnMapReadyCallback {
+public class ItineraryList extends AppCompatActivity implements LocationsAdapter.OnStartDragListener, OnMapReadyCallback {
 
     private Spinner daySelector;
     private MapView mapView;
@@ -56,11 +61,14 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
     private GeoApiContext geoApiContext;
     private TravelMode currentTravelMode = TravelMode.DRIVING;
     // Add these as class fields in ItineraryList.java
-    private LinearLayout locationsContainer;
+//    private LinearLayout locationsContainer;
     private static final int DEFAULT_DURATION_MINUTES = 60; // Default time to spend at each location
     private Map<String, String> locationNames = new HashMap<>(); // To store location names
     private Map<String, String> locationAddresses = new HashMap<>(); // To store location addresses
 
+    private RecyclerView locationsRecyclerView;
+    private LocationsAdapter locationsAdapter;
+    private ItemTouchHelper itemTouchHelper;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,17 +100,39 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
         // Initialize Spinner
         setupDaySelector();
         setupTransportModeSelector();
+        setupSaveItineraryButton();
+        // Initialize RecyclerView
+        locationsRecyclerView = findViewById(R.id.locationsRecyclerView);
+        if (locationsRecyclerView != null) {
+            locationsRecyclerView.setLayoutManager(new LinearLayoutManager(this));
 
+            // Get locations from intent
+            locations = getIntent().getParcelableArrayListExtra("LOCATIONS");
+            if (locations == null) {
+                locations = new ArrayList<>();
+            }
+
+            // Initialize adapter with empty list if necessary
+            locationsAdapter = new LocationsAdapter(locations, this);
+            locationsRecyclerView.setAdapter(locationsAdapter);
+
+            // Setup ItemTouchHelper
+            LocationItemTouchHelperCallback callback = new LocationItemTouchHelperCallback(locationsAdapter);
+            itemTouchHelper = new ItemTouchHelper(callback);
+            itemTouchHelper.attachToRecyclerView(locationsRecyclerView);
+        }
         // Initialize MapView
         mapView = findViewById(R.id.mapView);
         Bundle mapViewBundle = savedInstanceState != null ? savedInstanceState.getBundle(MAP_VIEW_BUNDLE_KEY) : null;
         mapView.onCreate(mapViewBundle);
         mapView.getMapAsync(this);
+
     }
 
     // Add this in onCreate() after setContentView
     private void initializeLocationsList() {
-        locationsContainer = findViewById(R.id.locationsContainer);
+//        locationsContainer = findViewById(R.id.locationsContainer);
+        locationsRecyclerView = findViewById(R.id.locationsRecyclerView);
     }
 
     // Add this method to fetch location details using Geocoder
@@ -202,29 +232,27 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
                 .setCallback(new PendingResult.Callback<DirectionsResult>() {
                     @Override
                     public void onResult(DirectionsResult result) {
-                        if (result != null) {
-                            if (result.routes.length > 0)
-                            {
-                                DirectionsRoute route = result.routes[0]; // Assuming the first route is the shortest
+                        runOnUiThread(() -> {  // Run on main thread
+                            if (result != null && result.routes.length > 0) {
+                                DirectionsRoute route = result.routes[0];
                                 List<LatLng> path = PolyUtil.decode(route.overviewPolyline.getEncodedPath());
 
-                                // Create a PolylineOptions object and customize it
                                 PolylineOptions polylineOptions = new PolylineOptions()
                                         .addAll(path)
                                         .color(Color.BLUE)
                                         .width(10)
                                         .geodesic(true);
 
-                                // Add the polyline to the map
                                 map.addPolyline(polylineOptions);
                             }
-                        }
+                        });
                     }
 
                     @Override
                     public void onFailure(Throwable e) {
-                        // Handle errors, e.g., API rate limits, network issues
-                        Log.e("ItineraryList", "Error fetching shortest path", e);
+                        runOnUiThread(() -> {  // Run on main thread
+                            Log.e("ItineraryList", "Error fetching shortest path", e);
+                        });
                     }
                 });
     }
@@ -260,7 +288,7 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
                         break;
                     case 3:
                         currentTravelMode = TravelMode.TRANSIT;
-                        break; 
+                        break;
                 }
                 int selectedDay = daySelector.getSelectedItemPosition() - 1;
                 try {
@@ -320,19 +348,53 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
             }
         });
     }
-
+    // Method to get current day's locations based on selected day
+    private List<LatLng> getCurrentDayLocations() {
+        int currentDay = daySelector.getSelectedItemPosition();
+        if (currentDay >= 0 && currentDay < dailyItineraries.size()) {
+            return dailyItineraries.get(currentDay);
+        }
+        return new ArrayList<>();
+    }
     private void updateMapForSelectedDay(int selectedDay) throws IOException, InterruptedException, ApiException {
-        googleMap.clear(); // Clear existing markers and polylines
+        googleMap.clear();
+        List<LatLng> locations;
 
         if (selectedDay == -1) {
-            // Show all days
+            // "All Days" selected
             displayAllDays();
-        } else {
-            // Show specific day
-            displaySpecificDay(selectedDay);
+            return;
+        }
+
+        locations = dailyItineraries.get(selectedDay);
+        displayDayItinerary(locations, selectedDay);
+
+        // Update adapter with current day's locations
+        locationsAdapter = new LocationsAdapter(locations, this);
+        locationsRecyclerView.setAdapter(locationsAdapter);
+
+        // Add markers and draw route
+        LatLngBounds.Builder boundsBuilder = new LatLngBounds.Builder();
+        for (LatLng location : locations) {
+            googleMap.addMarker(new MarkerOptions().position(location));
+            boundsBuilder.include(location);
+        }
+
+        if (!locations.isEmpty()) {
+            fetchDirectionsAndDrawRoute(locations, selectedDay);
+            LatLngBounds bounds = boundsBuilder.build();
+            googleMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100));
         }
     }
-
+    // Optional: Add save button listener to persist reordered locations
+    private void setupSaveItineraryButton() {
+        Button saveButton = findViewById(R.id.saveItineraryButton);
+        saveButton.setOnClickListener(v -> {
+            List<LatLng> currentLocations = locationsAdapter.getLocations();
+            // Implement save logic (e.g., to database or shared preferences)
+            Toast.makeText(this, "Itinerary order saved!", Toast.LENGTH_SHORT).show();
+        });
+    }
     private void fetchDirectionsAndDrawRoute(List<LatLng> locations, int day) {
         if (locations.size() < 2) return;
 
@@ -396,7 +458,7 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
     }
     // Update the displayAllDays method
     private void displayAllDays() {
-        locationsContainer.removeAllViews();
+//        locationsContainer.removeAllViews();
 
         for (int day = 0; day < dailyItineraries.size(); day++) {
             List<LatLng> dayLocations = dailyItineraries.get(day);
@@ -416,35 +478,35 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
             daySeparator.setTextSize(18);
             daySeparator.setTypeface(null, Typeface.BOLD);
             daySeparator.setPadding(0, 16, 0, 8);
-            locationsContainer.addView(daySeparator);
+//            locationsContainer.addView(daySeparator);
 
             // Add locations for this day
             for (int i = 0; i < dayLocations.size(); i++) {
                 LatLng location = dayLocations.get(i);
-                View locationItem = getLayoutInflater().inflate(R.layout.itinerary_location_item, locationsContainer, false);
-
-                TextView titleView = locationItem.findViewById(R.id.locationTitle);
-                TextView addressView = locationItem.findViewById(R.id.locationAddress);
-                TextView durationView = locationItem.findViewById(R.id.suggestedDuration);
-                TextView travelInfoView = locationItem.findViewById(R.id.travelInfo);
+//                View locationItem = getLayoutInflater().inflate(R.layout.itinerary_location_item, locationsContainer, false);
+//
+//                TextView titleView = locationItem.findViewById(R.id.locationTitle);
+//                TextView addressView = locationItem.findViewById(R.id.locationAddress);
+//                TextView durationView = locationItem.findViewById(R.id.suggestedDuration);
+//                TextView travelInfoView = locationItem.findViewById(R.id.travelInfo);
 
                 // Set initial loading state
-                titleView.setText("Loading...");
-                addressView.setText("Fetching address...");
-                durationView.setText(String.format("Suggested duration: %d min", DEFAULT_DURATION_MINUTES));
+//                titleView.setText("Loading...");
+//                addressView.setText("Fetching address...");
+//                durationView.setText(String.format("Suggested duration: %d min", DEFAULT_DURATION_MINUTES));
+//
+//                // Fetch location details
+//                fetchLocationDetails(location, titleView, addressView);
+//
+//                // If not the last location in the day, show travel time to next location
+//                if (i < dayLocations.size() - 1) {
+//                    LatLng nextLocation = dayLocations.get(i + 1);
+//                    fetchTravelTime(location, nextLocation, travelInfoView);
+//                } else {
+//                    travelInfoView.setVisibility(View.GONE);
+//                }
 
-                // Fetch location details
-                fetchLocationDetails(location, titleView, addressView);
-
-                // If not the last location in the day, show travel time to next location
-                if (i < dayLocations.size() - 1) {
-                    LatLng nextLocation = dayLocations.get(i + 1);
-                    fetchTravelTime(location, nextLocation, travelInfoView);
-                } else {
-                    travelInfoView.setVisibility(View.GONE);
-                }
-
-                locationsContainer.addView(locationItem);
+//                locationsContainer.addView(locationItem);
             }
         }
 
@@ -470,11 +532,11 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
 
     // Update the updateLocationsList method
     private void updateLocationsList(List<LatLng> locations, int day) {
-        locationsContainer.removeAllViews();
+        locationsRecyclerView.removeAllViews();
 
         for (int i = 0; i < locations.size(); i++) {
             LatLng location = locations.get(i);
-            View locationItem = getLayoutInflater().inflate(R.layout.itinerary_location_item, locationsContainer, false);
+            View locationItem = getLayoutInflater().inflate(R.layout.itinerary_location_item, locationsRecyclerView, false);
 
             TextView titleView = locationItem.findViewById(R.id.locationTitle);
             TextView addressView = locationItem.findViewById(R.id.locationAddress);
@@ -497,26 +559,42 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
                 travelInfoView.setVisibility(View.GONE);
             }
 
-            locationsContainer.addView(locationItem);
+            locationsRecyclerView.addView(locationItem);
         }
     }
 
-    private void displayDayItinerary(List<LatLng> dayLocations, int day) throws IOException, InterruptedException, ApiException {
-        if (dayLocations.isEmpty()) return;
-        for (int i = 0; i < dayLocations.size() - 1; i++) {
-            LatLng origin = dayLocations.get(i);
-            LatLng destination = dayLocations.get(i + 1);
-            fetchShortestPathAndDraw(origin, destination, googleMap);
-        }
+    private void displayDayItinerary(List<LatLng> locations, int day)
+            throws IOException, InterruptedException, ApiException {
+        if (googleMap == null) return;
+
+        googleMap.clear();
+
         // Add markers for all locations
-        for (int i = 0; i < dayLocations.size(); i++) {
-            LatLng location = dayLocations.get(i);
-            String title = "Day " + (day + 1) + " - Stop " + (i + 1);
-            googleMap.addMarker(new MarkerOptions().position(location).title(title));
+        for (int i = 0; i < locations.size(); i++) {
+            LatLng location = locations.get(i);
+            MarkerOptions markerOptions = new MarkerOptions()
+                    .position(location)
+                    .title("Location " + (i + 1));
+            googleMap.addMarker(markerOptions);
         }
 
-        // Get directions for the route
-        fetchDirectionsAndDrawRoute(dayLocations, day);
+        // Draw route between locations
+        if (locations.size() >= 2) {
+            fetchDirectionsAndDrawRoute(locations, day);
+        }
+
+        // Update the RecyclerView
+        locationsAdapter.updateLocations(locations);
+
+        // Zoom to show all markers
+        if (!locations.isEmpty()) {
+            LatLngBounds.Builder builder = new LatLngBounds.Builder();
+            for (LatLng location : locations) {
+                builder.include(location);
+            }
+            LatLngBounds bounds = builder.build();
+            googleMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100));
+        }
     }
 
     // Method to split locations into daily groups based on the number of days
@@ -535,37 +613,23 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
     }
 
     @Override
-    public void onMapReady(@NonNull GoogleMap map) {
+    public void onMapReady(GoogleMap map) {
         googleMap = map;
+        googleMap.setMapType(GoogleMap.MAP_TYPE_NORMAL);
 
-        // Loop through each day’s itinerary to add markers and polylines
-        for (int day = 0; day < dailyItineraries.size(); day++) {
-            List<LatLng> dayLocations = dailyItineraries.get(day);
-
-            if (!dayLocations.isEmpty()) {
-                // Add a marker for each stop in the day's itinerary
-                for (int i = 0; i < dayLocations.size(); i++) {
-                    LatLng location = dayLocations.get(i);
-                    String title = "Day " + (day + 1) + " - Stop " + (i + 1);
-                    googleMap.addMarker(new MarkerOptions().position(location).title(title));
-                }
-
-                // Add a polyline to connect all stops for the day
-                PolylineOptions polylineOptions = new PolylineOptions()
-                        .addAll(dayLocations)
-                        .clickable(true);
-
-                googleMap.addPolyline(polylineOptions);
-
-                // Move the camera to the first stop of the first day
-                if (day == 0) {
-                    googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(dayLocations.get(0), 12));
-                }
+        // Initial display of locations
+        int selectedDay = daySelector.getSelectedItemPosition() - 1;
+        try {
+            if (selectedDay >= 0) {
+                displaySpecificDay(selectedDay);
+            } else {
+                displayAllDays();
             }
+        } catch (IOException | InterruptedException | ApiException e) {
+            e.printStackTrace();
         }
     }
 
-    // MapView lifecycle methods
     @Override
     protected void onResume() {
         super.onResume();
@@ -573,37 +637,19 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
     }
 
     @Override
-    protected void onStart() {
-        super.onStart();
-        mapView.onStart();
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        mapView.onStop();
-    }
-
-    @Override
     protected void onPause() {
-        mapView.onPause();
         super.onPause();
-    }
+        mapView.onPause();
+    }   
 
     @Override
     protected void onDestroy() {
-        mapView.onDestroy();
         super.onDestroy();
+        mapView.onDestroy();
     }
 
     @Override
-    public void onLowMemory() {
-        super.onLowMemory();
-        mapView.onLowMemory();
-    }
-
-    @Override
-    protected void onSaveInstanceState(@NonNull Bundle outState) {
+    protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         Bundle mapViewBundle = outState.getBundle(MAP_VIEW_BUNDLE_KEY);
         if (mapViewBundle == null) {
@@ -611,5 +657,12 @@ public class ItineraryList extends AppCompatActivity implements OnMapReadyCallba
             outState.putBundle(MAP_VIEW_BUNDLE_KEY, mapViewBundle);
         }
         mapView.onSaveInstanceState(mapViewBundle);
+    }
+
+    @Override
+    public void onStartDrag(RecyclerView.ViewHolder viewHolder) {
+        if (itemTouchHelper != null) {
+            itemTouchHelper.startDrag(viewHolder);
+        }
     }
 }
